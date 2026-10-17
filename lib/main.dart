@@ -668,4 +668,336 @@ class _CadWorkspaceScreenState extends State<CadWorkspaceScreen> {
                 projectName = pCtrl.text.toUpperCase();
                 clientName = cCtrl.text.toUpperCase();
                 firmName = fCtrl.text.toUpperCase();
+              });
+              Navigator.pop(ctx);
+            },
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  bool _inPoly(Offset p, List<Offset> poly) {
+    bool inside = false;
+    for (int i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      final a = poly[i], b = poly[j];
+      if ((a.dy > p.dy) != (b.dy > p.dy) &&
+          p.dx < (b.dx - a.dx) * (p.dy - a.dy) / (b.dy - a.dy) + a.dx) {
+        inside = !inside;
+      }
+    }
+    return inside;
+  }
+
+  ArchItem? _hitItem(Offset p) {
+    for (final it in items.reversed) {
+      final rect = Rect.fromCenter(
+          center: it.position, width: it.size.width, height: it.size.height);
+      if (rect.contains(p)) return it;
+    }
+    return null;
+  }
+
+  void _onTap(Offset p) {
+    if (activeTool != ToolMode.select) return;
+    final hit = _hitItem(p);
+    if (hit != null) {
+      setState(() => selectedObject = hit);
+      return;
+    }
+    setState(() => selectedObject = null);
+    for (final r in detectedRooms) {
+      if (_inPoly(p, r.polygon)) {
+        _openRoomRenameDialog(r);
+        return;
+      }
+    }
+  }
+
+  void _deleteSelected() {
+    if (selectedObject == null) return;
+    _saveStateForUndo();
+    setState(() {
+      items.remove(selectedObject);
+      walls.remove(selectedObject);
+      selectedObject = null;
+      _recalculateRooms();
+    });
+  }
+
+  @override
+  void dispose() {
+    _zoomController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(firmName, style: const TextStyle(fontSize: 13)),
+        actions: [
+          IconButton(icon: const Icon(Icons.undo), onPressed: _undo),
+          IconButton(icon: const Icon(Icons.redo), onPressed: _redo),
+          IconButton(
+              icon: const Icon(Icons.delete_outline),
+              onPressed: _deleteSelected),
+          IconButton(
+              icon: const Icon(Icons.calculate),
+              onPressed: _showCivilEstimatorSheet),
+          IconButton(
+              icon: const Icon(Icons.edit_note),
+              onPressed: _openTitleBlockDialog),
+          IconButton(
+              icon: const Icon(Icons.straighten),
+              onPressed: () => setState(() => showMetric = !showMetric)),
+          IconButton(
+              icon: const Icon(Icons.blur_on),
+              onPressed: () =>
+                  setState(() => isBlueprintMode = !isBlueprintMode)),
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.home_work),
+            onSelected: _loadPresetTemplate,
+            itemBuilder: (_) => const [
+              PopupMenuItem(value: '2BHK', child: Text('Load 2BHK')),
+            ],
+          ),
+        ],
+      ),
+      body: InteractiveViewer(
+        transformationController: _zoomController,
+        panEnabled: activeTool == ToolMode.pan,
+        scaleEnabled: true,
+        minScale: 0.5,
+        maxScale: 4,
+        constrained: false,
+        child: GestureDetector(
+          onTapUp: (d) => _onTap(d.localPosition),
+          onPanStart: (d) {
+            final p = d.localPosition;
+            if (activeTool == ToolMode.wall) {
+              setState(() {
+                draftWallStart = _snapToGrid(p);
+                draftWallEnd = draftWallStart;
+              });
+            } else if (activeTool == ToolMode.select) {
+              final hit = _hitItem(p);
+              if (hit != null) {
+                _saveStateForUndo();
+                setState(() => selectedObject = hit);
+              }
+            }
+          },
+          onPanUpdate: (d) {
+            final p = d.localPosition;
+            if (activeTool == ToolMode.wall && draftWallStart != null) {
+              setState(() => draftWallEnd = _snapToGrid(p));
+            } else if (activeTool == ToolMode.select &&
+                selectedObject is ArchItem) {
+              setState(() => (selectedObject as ArchItem).position += d.delta);
+            }
+          },
+          onPanEnd: (_) {
+            if (activeTool == ToolMode.wall &&
+                draftWallStart != null &&
+                draftWallEnd != null) {
+              if ((draftWallEnd! - draftWallStart!).distance > 5) {
+                _saveStateForUndo();
+                walls.add(WallSegment(
+                    start: draftWallStart!,
+                    end: draftWallEnd!,
+                    type: activeWallType));
+                _recalculateRooms();
+              }
+            }
+            setState(() {
+              draftWallStart = null;
+              draftWallEnd = null;
+            });
+          },
+          child: CustomPaint(
+            size: const Size(400, 550),
+            painter: _PlanPainter(
+              walls: walls,
+              items: items,
+              rooms: detectedRooms,
+              draftStart: draftWallStart,
+              draftEnd: draftWallEnd,
+              selected: selectedObject,
+              fmt: _formatDistance,
+              blueprint: isBlueprintMode,
+              title: '$projectName • $clientName',
+            ),
+          ),
+        ),
+      ),
+      bottomNavigationBar: SafeArea(
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Row(
+            children: [
+              for (final t in ToolMode.values)
+                TextButton(
+                  onPressed: () => setState(() => activeTool = t),
+                  child: Text(t.name.toUpperCase(),
+                      style: TextStyle(
+                          color:
+                              t == activeTool ? Colors.amberAccent : null)),
+                ),
+              PopupMenuButton<WallType>(
+                icon: const Icon(Icons.line_weight),
+                onSelected: (v) => setState(() => activeWallType = v),
+                itemBuilder: (_) => const [
+                  PopupMenuItem(
+                      value: WallType.external9Inch, child: Text('9" wall')),
+                  PopupMenuItem(
+                      value: WallType.internal4Inch, child: Text('4" wall')),
+                  PopupMenuItem(
+                      value: WallType.beamLine, child: Text('Beam line')),
+                ],
+              ),
+              PopupMenuButton<int>(
+                icon: const Icon(Icons.chair),
+                onSelected: (i) {
+                  const defs = [
+                    ('Door', ArchElementType.doorSingle, 3.0, 3.0),
+                    ('Window', ArchElementType.windowGlass, 4.0, 0.5),
+                    ('Bed', ArchElementType.bedKing, 5.0, 5.5),
+                    ('Sofa', ArchElementType.sofaL, 4.5, 3.0),
+                    ('Column', ArchElementType.rccColumn, 0.75, 0.75),
+                  ];
+                  final d = defs[i];
+                  _spawnArchElement(d.$1, d.$2, d.$3, d.$4);
+                },
+                itemBuilder: (_) => const [
+                  PopupMenuItem(value: 0, child: Text('Door')),
+                  PopupMenuItem(value: 1, child: Text('Window')),
+                  PopupMenuItem(value: 2, child: Text('Bed')),
+                  PopupMenuItem(value: 3, child: Text('Sofa')),
+                  PopupMenuItem(value: 4, child: Text('Column')),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _PlanPainter extends CustomPainter {
+  final List<WallSegment> walls;
+  final List<ArchItem> items;
+  final List<ClosedRoom> rooms;
+  final Offset? draftStart;
+  final Offset? draftEnd;
+  final dynamic selected;
+  final String Function(double) fmt;
+  final bool blueprint;
+  final String title;
+
+  _PlanPainter({
+    required this.walls,
+    required this.items,
+    required this.rooms,
+    required this.draftStart,
+    required this.draftEnd,
+    required this.selected,
+    required this.fmt,
+    required this.blueprint,
+    required this.title,
+  });
+
+  void _text(Canvas c, String s, Offset at, double fs, Color col) {
+    final tp = TextPainter(
+      text: TextSpan(text: s, style: TextStyle(fontSize: fs, color: col)),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    tp.paint(c, at - Offset(tp.width / 2, tp.height / 2));
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.drawRect(
+        Offset.zero & size,
+        Paint()
+          ..color =
+              blueprint ? const Color(0xFF0B3D91) : const Color(0xFF111820));
+
+    final grid = Paint()
+      ..color = Colors.white.withValues(alpha: 0.06)
+      ..strokeWidth = 1;
+    for (double x = 0; x <= size.width; x += 25) {
+      canvas.drawLine(Offset(x, 0), Offset(x, size.height), grid);
+    }
+    for (double y = 0; y <= size.height; y += 25) {
+      canvas.drawLine(Offset(0, y), Offset(size.width, y), grid);
+    }
+
+    for (final r in rooms) {
+      final path = Path()..addPolygon(r.polygon, true);
+      canvas.drawPath(
+          path, Paint()..color = r.tintColor.withValues(alpha: 0.15));
+      _text(canvas, r.customName, r.center, 10, Colors.white);
+      _text(canvas, '${r.areaSqFt.toStringAsFixed(0)} sq ft',
+          r.center + const Offset(0, 13), 9, Colors.white60);
+    }
+
+    for (final w in walls) {
+      canvas.drawLine(
+        w.start,
+        w.end,
+        Paint()
+          ..color = identical(w, selected) ? Colors.amberAccent : Colors.white
+          ..strokeWidth = w.thicknessPx
+          ..strokeCap = StrokeCap.square,
+      );
+      _text(canvas, fmt(w.pixelLength),
+          (w.start + w.end) / 2 + const Offset(0, -12), 8, Colors.cyanAccent);
+    }
+
+    for (final it in items) {
+      canvas.save();
+      canvas.translate(it.position.dx, it.position.dy);
+      canvas.rotate(it.rotationDeg * 3.1415926535 / 180);
+      final rect = Rect.fromCenter(
+          center: Offset.zero, width: it.size.width, height: it.size.height);
+      canvas.drawRect(
+          rect, Paint()..color = Colors.orangeAccent.withValues(alpha: 0.25));
+      canvas.drawRect(
+        rect,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = identical(it, selected) ? 2.5 : 1
+          ..color = identical(it, selected)
+              ? Colors.amberAccent
+              : Colors.orangeAccent,
+      );
+      _text(canvas, it.label, Offset.zero, 9, Colors.white);
+      canvas.restore();
+    }
+
+    if (draftStart != null && draftEnd != null) {
+      canvas.drawLine(
+          draftStart!,
+          draftEnd!,
+          Paint()
+            ..color = Colors.lightBlueAccent
+            ..strokeWidth = 4);
+      _text(
+          canvas,
+          fmt((draftEnd! - draftStart!).distance),
+          (draftStart! + draftEnd!) / 2 + const Offset(0, -14),
+          10,
+          Colors.lightBlueAccent);
+    }
+
+    _text(canvas, title, Offset(size.width / 2, size.height - 12), 9,
+        Colors.white54);
+  }
+
+  @override
+  bool shouldRepaint(covariant _PlanPainter old) => true;
+}
    
